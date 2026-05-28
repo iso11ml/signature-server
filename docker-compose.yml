@@ -1,0 +1,120 @@
+services:
+  minio:
+    image: minio/minio@sha256:ea2c70cda70860c7d10f04ce1df640d3abb995784cb7aeedef8d4baa53a5a113
+    container_name: signature_minio
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "9010:9000"
+      - "9011:9001"
+    volumes:
+      - minio_data_v2:/data
+    command: server /data --console-address ":9001"
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://minio:9000/minio/health/ready"]
+      interval: 30s
+      timeout: 20s
+      retries: 5
+      start_period: 30s
+    networks:
+      - signature_network
+
+  postgres:
+    image: postgres:15
+    container_name: signature_postgres
+    restart: unless-stopped
+    ports:
+      - "5434:5432"
+    env_file:
+      - .env
+    environment:
+      - POSTGRES_USER=${DB_USER}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_DB=${DB_NAME}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME} -h localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - signature_network
+
+  mongo:
+    image: mongo:8
+    container_name: signature_mongo
+    restart: unless-stopped
+    ports:
+      - "27018:27017"
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_USERNAME}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_PASSWORD}
+      - MONGO_INITDB_DATABASE=${MONGO_DB_NAME}
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - signature_network
+
+  redis:
+    image: redis:7-alpine
+    container_name: signature_redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT}:6379"
+    volumes:
+      - redis_data:/data
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - signature_network
+
+  nestjs:
+    image: dataloplatforms/signature-server:1.0.0
+    container_name: nestjs
+    restart: always
+    ports: 
+      - "4000:4000"
+    depends_on:
+      - postgres
+      - mongo
+      - minio
+      - redis
+    networks:
+      - signature_network
+
+  nextjs:
+    image: dataloplatforms/signature-app:1.0.0
+    container_name: nextjs
+    restart: always
+    ports: 
+      - "4005:4005"
+    depends_on:
+      - postgres
+      - mongo
+      - minio
+    networks:
+      - signature_network
+
+volumes:
+  minio_data_v2:
+  postgres_data:
+  mongo_data:
+  redis_data:
+
+networks:
+  signature_network:
+    driver: bridge

@@ -4,58 +4,78 @@ import { Module } from '@nestjs/common';
 // Config & Database
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule, ConfigService } from '@nestjs/config';
+import { APP_INTERCEPTOR } from '@nestjs/core';
 
 // App
 import { AppService } from './app.service';
 import { AppController } from './app.controller';
 
 // Modules
-import { SignatureModule } from './signature/signature.module';
-import { DocumentModule } from './document/document.module';
 import { UserModule } from './user/user.module';
+import { AuthModule } from './auth/auth.module';
+import { MongooseModule } from '@nestjs/mongoose';
+import { AuditModule } from './audit/audit.module';
+import { ThrottlerModule } from '@nestjs/throttler';
+import { IpInterceptor } from './ip/ip.interceptor';
+import { SharedModule } from './shared/shared.module';
+import { EventEmitterModule } from '@nestjs/event-emitter';
+import { DocumentModule } from './document/document.module';
+import { SignatureModule } from './signature/signature.module';
+import { VerificationCodeModule } from './verification-code/verification-code.module';
+import { HealthModule } from './health/health.module';
 
 
 @Module({
   imports: [
-    TypeOrmModule.forRootAsync({
-      imports: [ConfigModule],
-      inject: [ConfigService],
-      useFactory: (config: ConfigService) => {
-        const databaseUrl = config.get<string>('DATABASE_URL');
-        
-        if (databaseUrl) {
-          return {
-            type: 'postgres',
-            url: databaseUrl,
-            autoLoadEntities: true,
-            synchronize: false,
-          } as const;
-        }
-
-        const host = config.get<string>('DB_HOST') || 'localhost';
-        const port = parseInt(config.get<string>('DB_PORT') || '5432', 10);
-        const username = config.get<string>('DB_USER') || 'postgres';
-        const password = config.get<string>('DB_PASSWORD') || 'postgres';
-        const database = config.get<string>('DB_NAME') || 'postgres';
-
-        return {
-          type: 'postgres',
-          host,
-          port,
-          username,
-          password,
-          database,
-          autoLoadEntities: true,
-          synchronize: false,
-        } as const;
-      },
+    EventEmitterModule.forRoot({
+      delimiter: '.'
     }),
 
-    SignatureModule,
+    TypeOrmModule.forRootAsync({
+      name: 'default',
+      imports: [ConfigModule],
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => ({
+        url: config.get('POSTGRES_DB_URL'),
+        type: 'postgres',
+        autoLoadEntities: true,
+        synchronize: true,
+      }),
+    }),
+
+    MongooseModule.forRootAsync({
+      imports: [ConfigModule],
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => ({
+        uri: config.get('MONGO_DB_URL'),
+      }),
+    }),
+
+    ThrottlerModule.forRoot({
+      throttlers: [
+        {
+          ttl: 60000,
+          limit: 10,
+        },
+      ],
+    }),
+
+    ConfigModule.forRoot({
+      isGlobal: true,
+    }),
+    AuthModule,
     DocumentModule,
     UserModule,
+    AuditModule,
+    SignatureModule,
+    VerificationCodeModule,
+    SharedModule,
+    HealthModule,
   ],
   controllers: [AppController],
-  providers: [AppService],
+  providers: [AppService, {
+    provide: APP_INTERCEPTOR,
+    useClass: IpInterceptor,
+  }, SharedModule],
 })
-export class AppModule {}
+export class AppModule { }

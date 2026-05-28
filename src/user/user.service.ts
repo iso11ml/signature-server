@@ -1,26 +1,215 @@
-import { Injectable } from '@nestjs/common';
+// External dependencies
+import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+
+// DTOs
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 
+// Entities
+import { UserEntity } from './entities/user.entity';
+
+// Enums
+import { UserRoles } from './enums/user-roles';
+
+// Interfaces
+import { BaseResponse } from 'src/interfaces/api-response.dto';
+import { SignatureService } from 'src/signature/signature.service';
+import { BUCKET_TYPES_ENUM } from 'src/shared/minio/enums/bucket-types.enum';
+
 @Injectable()
 export class UserService {
-  create(createUserDto: CreateUserDto) {
-    return 'This action adds a new user';
+  constructor(
+    @InjectRepository(UserEntity)
+    private userRepository: Repository<UserEntity>,
+
+    private signatureService: SignatureService
+  ) { }
+
+  async create(createUserDto: CreateUserDto): Promise<BaseResponse<UserEntity>> {
+    const existingUser = await this.userRepository.findOne({
+      where: { email: createUserDto.email.toLowerCase() }
+    });
+    if (existingUser) {
+      throw new ConflictException('Ya existe un usuario registrado con ese correo electrónico');
+    }
+
+    const user = this.userRepository.create({
+      ...(createUserDto.firstName && { firstName: createUserDto.firstName.toUpperCase() }),
+      ...(createUserDto.lastName && { lastName: createUserDto.lastName.toUpperCase() }),
+      ...(createUserDto.email && { email: createUserDto.email.toLowerCase() }),
+      ...(createUserDto.position && { position: createUserDto.position.toUpperCase() }),
+      roles: createUserDto.roles ?? [UserRoles.SIGNER],
+      ...(createUserDto.nationalId && { nationalId: createUserDto.nationalId.toUpperCase() }),
+    });
+
+    const newUser = await this.userRepository.save(user);
+
+    return {
+      success: true,
+      message: 'Usuario creado correctamente',
+      data: this.removeSensitiveData(newUser),
+    };
   }
 
-  findAll() {
-    return `This action returns all user`;
+  async findAllActiveUsers(withSignature = false): Promise<BaseResponse<UserEntity[]>> {
+    const users = await this.userRepository.find({
+      where: { isActive: true },
+      ...(withSignature && {
+        relations: { signature: true },
+        select: {
+          signature: {
+            id: true,
+            signatureObjectKey: true
+          }
+        }
+      })
+    });
+
+    if (!users || users.length === 0) {
+      return {
+        success: true,
+        message: 'No hay usuarios registrados',
+        data: [],
+      };
+    }
+
+    const secureUsers = await Promise.all(
+      users.map(async (user) => {
+        const sanitizedUser = this.removeSensitiveData(user);
+
+        if (withSignature && user.signature?.signatureObjectKey) {
+          const signature = await this.signatureService.getFile(
+            user.signature.signatureObjectKey,
+            BUCKET_TYPES_ENUM.SIGNATURE_IMAGES
+          );
+
+          return {
+            ...sanitizedUser,
+            signature: {
+              id: user.signature.id,
+              secureUrl: signature.secureUrl,
+              expiresIn: signature.expiresIn,
+            }
+          };
+        }
+        return sanitizedUser;
+      })
+    );
+
+    return {
+      success: true,
+      message: 'Usuarios obtenidos correctamente',
+      data: secureUsers as any,
+    };
   }
 
-  findOne(id: number) {
-    return `This action returns a #${id} user`;
+  async findOneActiveUser(id: string, withSignature = false): Promise<BaseResponse<UserEntity | null>> {
+    const user = await this.userRepository.findOne({
+      where: { id, isActive: true },
+      ...(withSignature && {
+        relations: {
+          signature: true
+        },
+        select: {
+          signature: {
+            id: true,
+            signatureObjectKey: true
+          }
+        }
+      })
+    });
+
+    if (!user) {
+      throw new NotFoundException(`Usuario con ID ${id} no encontrado`);
+    }
+
+    let signature;
+
+    const sanitizedUser = this.removeSensitiveData(user);
+
+    if (withSignature && user.signature?.signatureObjectKey) {
+      signature = await this.signatureService.getFile(
+        user.signature.signatureObjectKey,
+        BUCKET_TYPES_ENUM.SIGNATURE_IMAGES
+      );
+    }
+
+    const newUserObject = {
+      ...sanitizedUser,
+      ...(withSignature && user.signature?.signatureObjectKey && {
+        signature: {
+          id: user.signature.id,
+          secureUrl: signature.secureUrl,
+          expiresIn: signature.expiresIn
+        }
+      })
+    };
+
+    return {
+      success: true,
+      message: 'Usuario obtenido correctamente',
+      data: newUserObject as any,
+    };
   }
 
-  update(id: number, updateUserDto: UpdateUserDto) {
-    return `This action updates a #${id} user`;
+  async update(id: string, updateUserDto: UpdateUserDto): Promise<BaseResponse<any>> {
+    await this.userRepository.update(id, {
+      ...(updateUserDto.firstName && { firstName: updateUserDto.firstName.toUpperCase() }),
+      ...(updateUserDto.lastName && { lastName: updateUserDto.lastName.toUpperCase() }),
+      ...(updateUserDto.email && { email: updateUserDto.email.toLowerCase() }),
+      ...(updateUserDto.position && { position: updateUserDto.position.toUpperCase() }),
+      ...(updateUserDto.roles && { roles: updateUserDto.roles }),
+      ...(updateUserDto.nationalId && { nationalId: updateUserDto.nationalId.toUpperCase() }),
+    });
+
+
+    const updatedUser = await this.findOneActiveUser(id);
+
+    return {
+      success: true,
+      message: 'Usuario actualizado correctamente',
+      data: updatedUser,
+    };
   }
 
-  remove(id: number) {
-    return `This action removes a #${id} user`;
+  async findOne(id: string): Promise<UserEntity> {
+    const user = await this.userRepository.findOne({ where: { id } });
+    if (!user) {
+      throw new Error('Usuario no encontrado');
+    }
+    if (!user.isActive) {
+      throw new Error('Usuario no activo, no asignar a firmas');
+    }
+    return user;
+  }
+
+  async findOneByEmail(email: string): Promise<UserEntity> {
+    return this.userRepository.findOne({ where: { email, isDeleted: false } });
+  }
+
+  async remove(id: string): Promise<BaseResponse> {
+    const result = await this.userRepository.update(
+      { id, isActive: true },
+      { isDeleted: true, isActive: false }
+    );
+
+    if (result.affected === 0) {
+      throw new NotFoundException(`Usuario con ID ${id} no encontrado`);
+    }
+
+    return {
+      success: true,
+      message: 'Usuario eliminado correctamente',
+    };
+  }
+
+  private removeSensitiveData(user: UserEntity): UserEntity;
+  private removeSensitiveData(user: UserEntity[]): UserEntity[];
+  private removeSensitiveData(user: UserEntity | UserEntity[]): UserEntity | UserEntity[] {
+    const strip = ({ signatureId, createdAt, updatedAt, isActive, isDeleted, ...safeUser }: UserEntity) => safeUser as UserEntity;
+
+    return Array.isArray(user) ? user.map(strip) : strip(user);
   }
 }
