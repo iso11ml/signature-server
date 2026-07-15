@@ -77,22 +77,26 @@ export class UserService {
 
     const secureUsers = await Promise.all(
       users.map(async (user) => {
-        const sanitizedUser = this.removeSensitiveData(user);
+        const { signature: _rawSignature, ...sanitizedUser } = this.removeSensitiveData(user);
 
         if (withSignature && user.signature?.signatureObjectKey) {
-          const signature = await this.signatureService.getFile(
-            user.signature.signatureObjectKey,
-            BUCKET_TYPES_ENUM.SIGNATURE_IMAGES
-          );
+          try {
+            const signature = await this.signatureService.getFile(
+              user.signature.signatureObjectKey,
+              BUCKET_TYPES_ENUM.SIGNATURE_IMAGES
+            );
 
-          return {
-            ...sanitizedUser,
-            signature: {
-              id: user.signature.id,
-              secureUrl: signature.secureUrl,
-              expiresIn: signature.expiresIn,
-            }
-          };
+            return {
+              ...sanitizedUser,
+              signature: {
+                id: user.signature.id,
+                secureUrl: signature.secureUrl,
+                expiresIn: signature.expiresIn,
+              }
+            };
+          } catch {
+            return sanitizedUser;
+          }
         }
         return sanitizedUser;
       })
@@ -115,7 +119,8 @@ export class UserService {
         select: {
           signature: {
             id: true,
-            signatureObjectKey: true
+            signatureObjectKey: true,
+            officialCardObjectKey: true,
           }
         }
       })
@@ -126,23 +131,46 @@ export class UserService {
     }
 
     let signature;
+    let officialFile;
 
-    const sanitizedUser = this.removeSensitiveData(user);
+    const { signature: _rawSignature, ...sanitizedUser } = this.removeSensitiveData(user);
 
     if (withSignature && user.signature?.signatureObjectKey) {
-      signature = await this.signatureService.getFile(
-        user.signature.signatureObjectKey,
-        BUCKET_TYPES_ENUM.SIGNATURE_IMAGES
-      );
+      try {
+        signature = await this.signatureService.getFile(
+          user.signature.signatureObjectKey,
+          BUCKET_TYPES_ENUM.SIGNATURE_IMAGES
+        );
+      } catch {
+        signature = null;
+      }
+    }
+
+    if (withSignature && user.signature?.officialCardObjectKey) {
+      try {
+        officialFile = await this.signatureService.getFile(
+          user.signature.officialCardObjectKey,
+          BUCKET_TYPES_ENUM.OFICIAL_CARDS
+        );
+      } catch {
+        officialFile = null;
+      }
     }
 
     const newUserObject = {
       ...sanitizedUser,
-      ...(withSignature && user.signature?.signatureObjectKey && {
+      ...(withSignature && signature && {
         signature: {
           id: user.signature.id,
           secureUrl: signature.secureUrl,
           expiresIn: signature.expiresIn
+        }
+      }),
+      ...(withSignature && officialFile && {
+        officialFile: {
+          id: user.signature.id,
+          secureUrl: officialFile.secureUrl,
+          expiresIn: officialFile.expiresIn
         }
       })
     };
@@ -208,8 +236,42 @@ export class UserService {
   private removeSensitiveData(user: UserEntity): UserEntity;
   private removeSensitiveData(user: UserEntity[]): UserEntity[];
   private removeSensitiveData(user: UserEntity | UserEntity[]): UserEntity | UserEntity[] {
-    const strip = ({ signatureId, createdAt, updatedAt, isActive, isDeleted, ...safeUser }: UserEntity) => safeUser as UserEntity;
+    const strip = ({ signatureId, createdAt, updatedAt, isActive, isDeleted, password, ...safeUser }: UserEntity) => safeUser as UserEntity;
 
     return Array.isArray(user) ? user.map(strip) : strip(user);
+  }
+
+  sanitize(user: UserEntity): UserEntity {
+    return this.removeSensitiveData(user);
+  }
+
+  async createFromSignup(
+    dto: { firstName: string; lastName: string; email: string; position: string; nationalId: string },
+    hashedPassword: string,
+  ): Promise<BaseResponse<UserEntity>> {
+    const existingUser = await this.userRepository.findOne({
+      where: { email: dto.email.toLowerCase() },
+    });
+    if (existingUser) {
+      throw new ConflictException('Ya existe un usuario registrado con ese correo electrónico');
+    }
+
+    const user = this.userRepository.create({
+      firstName: dto.firstName.toUpperCase(),
+      lastName: dto.lastName.toUpperCase(),
+      email: dto.email.toLowerCase(),
+      position: dto.position.toUpperCase(),
+      roles: [UserRoles.SIGNER],
+      nationalId: dto.nationalId.toUpperCase(),
+      password: hashedPassword,
+    });
+
+    const newUser = await this.userRepository.save(user);
+
+    return {
+      success: true,
+      message: 'Usuario registrado correctamente',
+      data: this.removeSensitiveData(newUser),
+    };
   }
 }
